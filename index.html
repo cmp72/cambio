@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://open.er-api.com https://dolarapi.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>Cambio</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root{--bg:#f4f6f5;--card:#fff;--txt:#14201e;--mut:#5b6b68;--acc:#0f766e;--line:#dde3e1;--warn:#9a5b00}
+  @media (prefers-color-scheme:dark){:root{--bg:#0e1413;--card:#172120;--txt:#e8efed;--mut:#9aaba7;--acc:#2dd4bf;--line:#2a3735;--warn:#f0b35a}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);
+       padding:max(16px,env(safe-area-inset-top)) 16px 32px}
+  main{max-width:460px;margin:0 auto}
+  h1{font-size:1.4rem;margin:8px 0 16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+  label{display:block;font-size:.8rem;color:var(--mut);margin-bottom:4px}
+  input,select{width:100%;font-size:1.3rem;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--txt)}
+  .row{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:end;margin-top:12px}
+  button{font-size:1.3rem;border:0;border-radius:10px;background:var(--acc);color:#fff;height:50px;width:50px;cursor:pointer}
+  .res{font-size:1.9rem;font-weight:700;margin:4px 0;word-break:break-word}
+  .sub{font-size:.85rem;color:var(--mut)}
+  .tag{display:inline-block;font-size:.75rem;font-weight:600;padding:2px 8px;border-radius:99px;background:var(--bg);border:1px solid var(--line);margin-bottom:6px}
+  .warn{color:var(--warn)}
+  footer{font-size:.75rem;color:var(--mut);line-height:1.5;margin-top:16px}
+  footer a{color:var(--mut)}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Cambio de moneda</h1>
+
+  <div class="card">
+    <label for="amt">Cantidad</label>
+    <input id="amt" type="text" inputmode="decimal" autocomplete="off" value="10000">
+    <div class="row">
+      <div><label for="from">De</label><select id="from"></select></div>
+      <button id="swap" type="button" aria-label="Intercambiar monedas">⇄</button>
+      <div><label for="to">A</label><select id="to"></select></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <span class="tag">Oficial / mercado</span>
+    <div class="res" id="resOf">—</div>
+    <div class="sub" id="subOf"></div>
+  </div>
+
+  <div class="card" id="blueCard" hidden>
+    <span class="tag">Dólar blue (estimado)</span>
+    <div class="res" id="resBl">—</div>
+    <div class="sub" id="subBl"></div>
+  </div>
+
+  <div class="sub" id="status"></div>
+
+  <footer>
+    Valores orientativos, no son una oferta de cambio. Pueden diferir de lo que te dé un banco o casa de cambio.<br>
+    <a href="https://www.exchangerate-api.com" target="_blank" rel="noopener">Rates By Exchange Rate API</a> ·
+    Blue: <a href="https://dolarapi.com" target="_blank" rel="noopener">DolarApi</a> (fuente no oficial).
+  </footer>
+</main>
+
+<script>
+"use strict";
+// Monedas que aparecen en la lista. Para añadir otra, agrega su código ISO aquí.
+const MONEDAS = ["ARS","EUR","USD","BRL","UYU","CLP","GBP","CHF","MXN"];
+const RATES_URL = "https://open.er-api.com/v6/latest/USD";
+const BLUE_URL  = "https://dolarapi.com/v1/dolares/blue";
+
+const $ = id => document.getElementById(id);
+const nombres = new Intl.DisplayNames(["es"], {type:"currency"});
+let rates = null, blue = null, ratesTime = "";
+
+function store(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+function load(k){ try{ return JSON.parse(localStorage.getItem(k)); }catch(e){ return null; } }
+
+function fmt(n, cur){
+  return new Intl.NumberFormat("es-ES",{style:"currency",currency:cur,maximumFractionDigits:2}).format(n);
+}
+function parseAmount(s){
+  // Acepta "10.000,50" o "10000.50"
+  s = String(s).trim().replace(/\s/g,"");
+  if (s.includes(",")) s = s.replace(/\./g,"").replace(",",".");
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 && n < 1e15 ? n : null;
+}
+
+function fillSelects(){
+  for (const sel of [$("from"),$("to")]){
+    for (const c of MONEDAS){
+      const o = document.createElement("option");
+      o.value = c; o.textContent = c; o.title = nombres.of(c) || c;
+      sel.appendChild(o);
+    }
+  }
+  const last = load("pair");
+  $("from").value = last?.from && MONEDAS.includes(last.from) ? last.from : "ARS";
+  $("to").value   = last?.to   && MONEDAS.includes(last.to)   ? last.to   : "EUR";
+}
+
+function calc(){
+  const amt = parseAmount($("amt").value), from = $("from").value, to = $("to").value;
+  store("pair",{from,to});
+  if (amt === null){ $("resOf").textContent = "Cantidad no válida"; $("subOf").textContent=""; $("blueCard").hidden = true; return; }
+  if (!rates || !rates[from] || !rates[to]){ $("resOf").textContent = "—"; $("subOf").textContent = "Sin datos de cotización"; }
+  else {
+    const r = rates[to] / rates[from];          // base USD
+    $("resOf").textContent = fmt(amt * r, to);
+    $("subOf").textContent = r >= 1 ? `1 ${from} = ${fmt(r,to)}` : `1 ${to} = ${fmt(1/r,from)}`;
+  }
+
+  // Blue: solo tiene sentido si una de las dos monedas es ARS
+  const usaBlue = (from === "ARS") !== (to === "ARS");
+  $("blueCard").hidden = !(usaBlue && blue && rates);
+  if (!$("blueCard").hidden){
+    let res;
+    if (from === "ARS"){ // compras divisa: pagas precio de venta
+      const usd = amt / blue.venta;
+      res = usd * rates[to];
+      $("subBl").textContent = `Dólar blue venta: ${fmt(blue.venta,"ARS")}` + (to!=="USD" ? ` · convertido a ${to} vía USD` : "");
+    } else {            // vendes divisa: te pagan precio de compra
+      const usd = amt / rates[from];
+      res = usd * blue.compra;
+      $("subBl").textContent = `Dólar blue compra: ${fmt(blue.compra,"ARS")}` + (from!=="USD" ? ` · ${from} convertido a USD primero` : "");
+    }
+    $("resBl").textContent = fmt(res, to);
+  }
+}
+
+async function getJSON(url){
+  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), 10000);
+  try{
+    const r = await fetch(url,{signal:ctrl.signal, cache:"no-store"});
+    if (!r.ok) throw new Error("HTTP "+r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+function validBlue(b){ return b && Number(b.compra) > 0 && Number(b.venta) > 0; }
+
+async function refresh(){
+  // Primero muestra lo guardado (sirve sin conexión)
+  const cR = load("rates"), cB = load("blue");
+  if (cR){ rates = cR.rates; ratesTime = cR.time; }
+  if (validBlue(cB)) blue = cB;
+  calc();
+  $("status").textContent = "Actualizando…";
+  const msgs = [];
+  try{
+    const d = await getJSON(RATES_URL);
+    if (d.result !== "success" || !d.rates) throw new Error("respuesta inválida");
+    rates = d.rates; ratesTime = d.time_last_update_utc;
+    store("rates",{rates, time: ratesTime});
+  } catch(e){ msgs.push("No se pudo actualizar la cotización oficial" + (rates ? " (uso la última guardada)" : "")); }
+  try{
+    const b = await getJSON(BLUE_URL);
+    if (!validBlue(b)) throw new Error("respuesta inválida");
+    blue = {compra:Number(b.compra), venta:Number(b.venta), fecha:b.fechaActualizacion};
+    store("blue", blue);
+  } catch(e){ msgs.push("No se pudo actualizar el blue" + (blue ? " (uso el último guardado)" : "")); }
+  calc();
+  const partes = [];
+  if (ratesTime) partes.push("Oficial: " + new Date(ratesTime).toLocaleString("es-ES"));
+  if (blue?.fecha) partes.push("Blue: " + new Date(blue.fecha).toLocaleString("es-ES"));
+  $("status").innerHTML = "";
+  $("status").textContent = partes.join(" · ");
+  if (msgs.length){ const p = document.createElement("div"); p.className="warn"; p.textContent = msgs.join(". "); $("status").appendChild(p); }
+}
+
+fillSelects();
+$("amt").addEventListener("input", calc);
+$("from").addEventListener("change", calc);
+$("to").addEventListener("change", calc);
+$("swap").addEventListener("click", ()=>{ const f=$("from").value; $("from").value=$("to").value; $("to").value=f; calc(); });
+refresh();
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(()=>{});
+</script>
+</body>
+</html>
